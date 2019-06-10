@@ -14,6 +14,9 @@
 
 //! Main for building the binary of a Grin peer-to-peer node.
 
+/*
+TODO grin 节点入口
+*/
 #[macro_use]
 extern crate clap;
 
@@ -34,6 +37,7 @@ mod cmd;
 pub mod tui;
 
 // include build information
+// 导入 构建信息
 pub mod built_info {
 	include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
@@ -63,13 +67,20 @@ fn log_build_info() {
 	debug!("{}", detailed_info);
 }
 
+
+/*
+TODO  节点主入口
+*/
 fn main() {
 	let exit_code = real_main();
 	std::process::exit(exit_code);
 }
 
 fn real_main() -> i32 {
+
+	// 加载 grin 的配置
 	let yml = load_yaml!("grin.yml");
+	// 解析出 yml 配置中的参数
 	let args = App::from_yaml(yml).get_matches();
 	let node_config;
 
@@ -108,8 +119,10 @@ fn real_main() -> i32 {
 	}
 
 	// Load relevant config
+	// 加载出有意义的参数
 	match args.subcommand() {
 		// When the subscommand is 'server' take into account the 'config_file' flag
+		// 当子命令是'server'时，请考虑'config_file'标志
 		("server", Some(server_args)) => {
 			if let Some(_path) = server_args.value_of("config_file") {
 				node_config = Some(config::GlobalConfig::new(_path).unwrap_or_else(|e| {
@@ -124,6 +137,7 @@ fn real_main() -> i32 {
 			}
 		}
 		// Otherwise load up the node config as usual
+		// 否则像往常一样加载节点配置
 		_ => {
 			node_config = Some(
 				config::initial_setup_server(&chain_type).unwrap_or_else(|e| {

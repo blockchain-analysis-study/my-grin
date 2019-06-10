@@ -13,6 +13,11 @@
 // limitations under the License.
 
 /// Grin server commands processing
+/*
+TODO 一个基于grin版本v1.0.3添加的中文注释
+
+Grin 的服务端入口
+*/
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
