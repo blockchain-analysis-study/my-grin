@@ -372,6 +372,10 @@ impl p2p::ChainAdapter for NetToChainAdapter {
 		}
 	}
 
+	fn txhashset_archive_header(&self) -> Result<core::BlockHeader, chain::Error> {
+		self.chain().txhashset_archive_header()
+	}
+
 	fn txhashset_receive_ready(&self) -> bool {
 		match self.sync_state.status() {
 			SyncStatus::TxHashsetDownload { .. } => true,
@@ -722,7 +726,12 @@ impl ChainAdapter for ChainToPoolAndNetAdapter {
 		// Reconcile the txpool against the new block *after* we have broadcast it too our peers.
 		// This may be slow and we do not want to delay block propagation.
 		// We only want to reconcile the txpool against the new block *if* total work has increased.
-		if status == BlockStatus::Next || status == BlockStatus::Reorg {
+		let is_reorg = if let BlockStatus::Reorg(_) = status {
+			true
+		} else {
+			false
+		};
+		if status == BlockStatus::Next || is_reorg {
 			let mut tx_pool = self.tx_pool.write();
 
 			let _ = tx_pool.reconcile_block(b);
@@ -732,7 +741,7 @@ impl ChainAdapter for ChainToPoolAndNetAdapter {
 			tx_pool.truncate_reorg_cache(cutoff);
 		}
 
-		if status == BlockStatus::Reorg {
+		if is_reorg {
 			let _ = self.tx_pool.write().reconcile_reorg_cache(&b.header);
 		}
 	}

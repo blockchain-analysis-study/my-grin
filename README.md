@@ -8,7 +8,9 @@
 
 # Grin
 
+
 一个基于grin版本v1.0.3添加的中文注释 合并了一次 v1.1.0的
+
 
 Grin is an in-progress implementation of the MimbleWimble protocol. Many characteristics are still undefined but the following constitutes a first set of choices:
 

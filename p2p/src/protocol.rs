@@ -12,24 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use rand::{thread_rng, Rng};
-use std::cmp;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Seek, SeekFrom, Write};
-use std::sync::Arc;
-
-use chrono::prelude::Utc;
-use tempfile::tempfile;
-
-use crate::conn::{Message, MessageHandler, Response};
-use crate::core::core::{self, hash::Hash, CompactBlock};
-use crate::util::{RateCounter, RwLock};
+use crate::conn::{Message, MessageHandler, Response, Tracker};
+use crate::core::core::{self, hash::Hash, hash::Hashed, CompactBlock};
 
 use crate::msg::{
 	BanReason, GetPeerAddrs, Headers, KernelDataResponse, Locator, PeerAddrs, Ping, Pong,
 	TxHashSetArchive, TxHashSetRequest, Type,
 };
 use crate::types::{Error, NetAdapter, PeerInfo};
+use chrono::prelude::Utc;
+use rand::{thread_rng, Rng};
+use std::cmp;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::sync::Arc;
+use tempfile::tempfile;
 
 pub struct Protocol {
 	adapter: Arc<dyn NetAdapter>,
@@ -47,7 +44,7 @@ impl MessageHandler for Protocol {
 		&self,
 		mut msg: Message<'a>,
 		writer: &'a mut dyn Write,
-		received_bytes: Arc<RwLock<RateCounter>>,
+		tracker: Arc<Tracker>,
 	) -> Result<Option<Response<'a>>, Error> {
 		let adapter = &self.adapter;
 
@@ -275,7 +272,7 @@ impl MessageHandler for Protocol {
 
 					// Increase received bytes quietly (without affecting the counters).
 					// Otherwise we risk banning a peer as "abusive".
-					received_bytes.write().inc_quiet(size as u64);
+					tracker.inc_quiet_received(size as u64);
 				}
 
 				// Remember to seek back to start of the file as the caller is likely
@@ -296,20 +293,22 @@ impl MessageHandler for Protocol {
 
 			Type::TxHashSetRequest => {
 				let sm_req: TxHashSetRequest = msg.body()?;
-				debug!(
-					"handle_payload: txhashset req for {} at {}",
-					sm_req.hash, sm_req.height
-				);
 
-				let txhashset = self.adapter.txhashset_read(sm_req.hash);
+				let txhashset_header = self.adapter.txhashset_archive_header()?;
+				let txhashset_header_hash = txhashset_header.hash();
+				debug!(
+					"handle_payload: txhashset request for {} at {}, response with {} at {}",
+					sm_req.hash, sm_req.height, txhashset_header.height, txhashset_header_hash,
+				);
+				let txhashset = self.adapter.txhashset_read(txhashset_header_hash);
 
 				if let Some(txhashset) = txhashset {
 					let file_sz = txhashset.reader.metadata()?.len();
 					let mut resp = Response::new(
 						Type::TxHashSetArchive,
 						&TxHashSetArchive {
-							height: sm_req.height as u64,
-							hash: sm_req.hash,
+							height: txhashset_header.height as u64,
+							hash: txhashset_header_hash,
 							bytes: file_sz,
 						},
 						writer,
@@ -362,10 +361,7 @@ impl MessageHandler for Protocol {
 
 						// Increase received bytes quietly (without affecting the counters).
 						// Otherwise we risk banning a peer as "abusive".
-						{
-							let mut received_bytes = received_bytes.write();
-							received_bytes.inc_quiet(size as u64);
-						}
+						tracker.inc_quiet_received(size as u64)
 					}
 					tmp_zip
 						.into_inner()

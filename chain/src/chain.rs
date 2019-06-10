@@ -33,7 +33,7 @@ use crate::types::{
 	BlockStatus, ChainAdapter, NoStatus, Options, Tip, TxHashSetRoots, TxHashsetWriteStatus,
 };
 use crate::util::secp::pedersen::{Commitment, RangeProof};
-use crate::util::{Mutex, RwLock, StopState};
+use crate::util::RwLock;
 use grin_store::Error::NotFoundErr;
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -152,7 +152,6 @@ pub struct Chain {
 	// POW verification function
 	pow_verifier: fn(&BlockHeader) -> Result<(), pow::Error>,
 	archive_mode: bool,
-	stop_state: Arc<Mutex<StopState>>,
 	genesis: BlockHeader,
 }
 
@@ -167,16 +166,7 @@ impl Chain {
 		pow_verifier: fn(&BlockHeader) -> Result<(), pow::Error>,
 		verifier_cache: Arc<RwLock<dyn VerifierCache>>,
 		archive_mode: bool,
-		stop_state: Arc<Mutex<StopState>>,
 	) -> Result<Chain, Error> {
-		// Note: We take a lock on the stop_state here and do not release it until
-		// we have finished chain initialization.
-		let stop_state_local = stop_state.clone();
-		let stop_lock = stop_state_local.lock();
-		if stop_lock.is_stopped() {
-			return Err(ErrorKind::Stopped.into());
-		}
-
 		let store = Arc::new(store::ChainStore::new(&db_root)?);
 
 		// open the txhashset, creating a new one if necessary
@@ -194,7 +184,6 @@ impl Chain {
 			pow_verifier,
 			verifier_cache,
 			archive_mode,
-			stop_state,
 			genesis: genesis.header.clone(),
 		})
 	}
@@ -265,15 +254,18 @@ impl Chain {
 		let is_more_work = head.is_some();
 
 		let mut is_next_block = false;
+		let mut reorg_depth = None;
 		if let Some(head) = head {
 			if head.prev_block_h == prev_head.last_block_h {
 				is_next_block = true;
+			} else {
+				reorg_depth = Some(prev_head.height.saturating_sub(head.height) + 1);
 			}
 		}
 
 		match (is_more_work, is_next_block) {
 			(true, true) => BlockStatus::Next,
-			(true, false) => BlockStatus::Reorg,
+			(true, false) => BlockStatus::Reorg(reorg_depth.unwrap_or(0)),
 			(false, _) => BlockStatus::Fork,
 		}
 	}
@@ -283,15 +275,6 @@ impl Chain {
 	/// or false if it has added to a fork (or orphan?).
 	fn process_block_single(&self, b: Block, opts: Options) -> Result<Option<Tip>, Error> {
 		let (maybe_new_head, prev_head) = {
-			// Note: We take a lock on the stop_state here and do not release it until
-			// we have finished processing this single block.
-			// We take care to write both the txhashset *and* the batch while we
-			// have the stop_state lock.
-			let stop_lock = self.stop_state.lock();
-			if stop_lock.is_stopped() {
-				return Err(ErrorKind::Stopped.into());
-			}
-
 			let mut txhashset = self.txhashset.write();
 			let batch = self.store.batch()?;
 			let mut ctx = self.new_ctx(opts, batch, &mut txhashset)?;
@@ -381,15 +364,6 @@ impl Chain {
 	/// This is only ever used during sync and is based on sync_head.
 	/// We update header_head here if our total work increases.
 	pub fn sync_block_headers(&self, headers: &[BlockHeader], opts: Options) -> Result<(), Error> {
-		// Note: We take a lock on the stop_state here and do not release it until
-		// we have finished processing this single block.
-		// We take care to write both the txhashset *and* the batch while we
-		// have the stop_state lock.
-		let stop_lock = self.stop_state.lock();
-		if stop_lock.is_stopped() {
-			return Err(ErrorKind::Stopped.into());
-		}
-
 		let mut txhashset = self.txhashset.write();
 		let batch = self.store.batch()?;
 		let mut ctx = self.new_ctx(opts, batch, &mut txhashset)?;
@@ -709,6 +683,27 @@ impl Chain {
 			header.kernel_mmr_size,
 			txhashset_reader,
 		))
+	}
+
+	/// To support the ability to download the txhashset from multiple peers in parallel,
+	/// the peers must all agree on the exact binary representation of the txhashset.
+	/// This means compacting and rewinding to the exact same header.
+	/// Since compaction is a heavy operation, peers can agree to compact every 12 hours,
+	/// and no longer support requesting arbitrary txhashsets.
+	/// Here we return the header of the txhashset we are currently offering to peers.
+	pub fn txhashset_archive_header(&self) -> Result<BlockHeader, Error> {
+		let sync_threshold = global::state_sync_threshold() as u64;
+		let body_head = self.head()?;
+		let archive_interval = global::txhashset_archive_interval();
+		let mut txhashset_height = body_head.height.saturating_sub(sync_threshold);
+		txhashset_height = txhashset_height.saturating_sub(txhashset_height % archive_interval);
+
+		debug!(
+			"txhashset_archive_header: body_head - {}, {}, txhashset height - {}",
+			body_head.last_block_h, body_head.height, txhashset_height,
+		);
+
+		self.get_header_by_height(txhashset_height)
 	}
 
 	// Special handling to make sure the whole kernel set matches each of its
@@ -1096,14 +1091,6 @@ impl Chain {
 				debug!("compact: skipping compaction - threshold is 60 blocks beyond horizon.");
 				return Ok(());
 			}
-		}
-
-		// Note: We take a lock on the stop_state here and do not release it until
-		// we have finished processing this chain compaction operation.
-		// We want to avoid shutting the node down in the middle of compacting the data.
-		let stop_lock = self.stop_state.lock();
-		if stop_lock.is_stopped() {
-			return Err(ErrorKind::Stopped.into());
 		}
 
 		// Take a write lock on the txhashet and start a new writeable db batch.
